@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import os
 
 // MARK: - 行索引（只存偏移，不存文本）
 // 每条 16 字节，1000 万行 = 160 MB，可接受
@@ -42,6 +43,7 @@ private class LineCache {
 
 // MARK: - LogFile
 class LogFile: ObservableObject, Identifiable, Equatable {
+    private let logger = Logger(subsystem: "com.logviewer.app", category: "LogFileLoad")
     let id   = UUID()
     let url  : URL
     var displayName: String { url.lastPathComponent }
@@ -65,8 +67,8 @@ class LogFile: ObservableObject, Identifiable, Equatable {
 
     private var loadTask: Task<Void, Never>?
 
-    /// 大文件阈值：超过 50 MB 启用索引模式
-    static let largeThreshold: Int = 10 * 1024 * 1024   // 10MB以上走索引模式
+    /// 大文件阈值：降低到 1 MB，避免高行数文件落入 NSTextView 路径后跳转不稳定
+    static let largeThreshold: Int = 1 * 1024 * 1024
 
     init(url: URL) {
         self.url = url
@@ -193,6 +195,7 @@ class LogFile: ObservableObject, Identifiable, Equatable {
         }
         do {
             let fileSize = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            logger.info("Load start file=\(self.url.path, privacy: .public) size=\(fileSize)")
             if fileSize > Self.largeThreshold {
                 await buildIndex(fileSize: Int64(fileSize))
             } else {
@@ -201,6 +204,7 @@ class LogFile: ObservableObject, Identifiable, Equatable {
         } catch {
             await MainActor.run { errorMessage = error.localizedDescription }
         }
+        logger.info("Load finished file=\(self.url.path, privacy: .public) large=\(self.isLargeFile) totalLines=\(self.totalLineCount)")
         await MainActor.run { isLoading = false }
     }
 

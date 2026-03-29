@@ -1,23 +1,58 @@
 import SwiftUI
+import os
 
-struct ScrollTarget: Equatable {
+enum NavigationSource {
+    case searchResult
+    case nextMatch
+    case previousMatch
+    case directLine
+}
+
+struct ActiveLocation: Equatable {
     let fileID: UUID
     let lineNumber: Int
+    let source: NavigationSource
+    let result: SearchResult?
     let token: UUID = UUID()  // 每次新建token不同，确保onChange必触发
 
-    static func == (lhs: ScrollTarget, rhs: ScrollTarget) -> Bool {
+    static func == (lhs: ActiveLocation, rhs: ActiveLocation) -> Bool {
         lhs.token == rhs.token
     }
 }
 
 class SearchViewModel: ObservableObject {
+    private let logger = Logger(subsystem: "com.logviewer.app", category: "SearchNavigation")
     @Published var keyword: String = ""
     @Published var ignoreCase: Bool = true
     @Published var direction: SearchDirection = .down
     @Published var scope: SearchScope = .currentFile
     @Published var selectedFolderURL: URL? = nil
-    @Published var scrollToLine: ScrollTarget? = nil
-    @Published var highlightResult: SearchResult? = nil
+    @Published var activeLocation: ActiveLocation? = nil
+
+    func currentLine(in file: LogFile) -> Int? {
+        guard let activeLocation, activeLocation.fileID == file.id else { return nil }
+        return activeLocation.lineNumber
+    }
+
+    func activate(result: SearchResult, in file: LogFile, source: NavigationSource) {
+        logger.info("Activate result source=\(String(describing: source), privacy: .public) fileID=\(file.id.uuidString, privacy: .public) line=\(result.lineNumber)")
+        activeLocation = ActiveLocation(
+            fileID: file.id,
+            lineNumber: result.lineNumber,
+            source: source,
+            result: result
+        )
+    }
+
+    func activateLine(_ lineNumber: Int, in file: LogFile, source: NavigationSource) {
+        logger.info("Activate line source=\(String(describing: source), privacy: .public) fileID=\(file.id.uuidString, privacy: .public) line=\(lineNumber)")
+        activeLocation = ActiveLocation(
+            fileID: file.id,
+            lineNumber: lineNumber,
+            source: source,
+            result: nil
+        )
+    }
 }
 
 // MARK: - Search Toolbar
@@ -187,7 +222,7 @@ struct SearchToolbarView: View {
         guard !searchVM.keyword.isEmpty,
               let file = appState.selectedFile else { return }
 
-        let currentLine = searchVM.highlightResult?.lineNumber ?? (direction == .down ? 0 : Int.max)
+        let currentLine = searchVM.currentLine(in: file) ?? (direction == .down ? 0 : Int.max)
 
         // 优先从当前文件的已有搜索结果中找（不读磁盘）
         let allResults = appState.searchSessions
@@ -208,8 +243,11 @@ struct SearchToolbarView: View {
         }
 
         if let found = candidate {
-            searchVM.highlightResult = found
-            searchVM.scrollToLine = ScrollTarget(fileID: file.id, lineNumber: found.lineNumber)
+            searchVM.activate(
+                result: found,
+                in: file,
+                source: direction == .down ? .nextMatch : .previousMatch
+            )
             return
         }
 
@@ -229,9 +267,11 @@ struct SearchToolbarView: View {
                 $0.text.range(of: searchVM.keyword, options: compareOptions) != nil }
         }
         if let f = found2 {
-            let result = SearchResult(fileURL: file.url, lineNumber: f.lineNumber, lineText: f.text)
-            searchVM.highlightResult = result
-            searchVM.scrollToLine = ScrollTarget(fileID: file.id, lineNumber: f.lineNumber)
+            searchVM.activateLine(
+                f.lineNumber,
+                in: file,
+                source: direction == .down ? .nextMatch : .previousMatch
+            )
         } else {
             noMatchAlert = true
         }

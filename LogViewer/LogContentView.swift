@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import os
 
 // MARK: - Tab 栏
 
@@ -77,12 +78,12 @@ struct LogContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if file.isLargeFile {
             // 大文件：NSTableView 虚拟滚动，按需读取行
-            LargeFileTableView(file: file, scrollTarget: searchVM.scrollToLine)
+            LargeFileTableView(file: file, activeLocation: searchVM.activeLocation)
         } else {
             // 小文件：NSTextView（支持多行复制）
             SmallFileTextView(lines: file.lines,
                               fileID: file.id,
-                              scrollTarget: searchVM.scrollToLine)
+                              activeLocation: searchVM.activeLocation)
         }
     }
 }
@@ -92,7 +93,7 @@ struct LogContentView: View {
 struct SmallFileTextView: NSViewRepresentable {
     let lines: [LogLine]
     let fileID: UUID
-    let scrollTarget: ScrollTarget?
+    let activeLocation: ActiveLocation?
 
     func makeCoordinator() -> SmallCoord { SmallCoord() }
 
@@ -119,15 +120,18 @@ struct SmallFileTextView: NSViewRepresentable {
     func updateNSView(_ sv: NSScrollView, context: Context) {
         let coord = context.coordinator
         if coord.loadedCount != lines.count { coord.build(lines: lines) }
-        if let t = scrollTarget, t.fileID == fileID, t.token != coord.lastToken {
-            coord.lastToken = t.token
-            let idx = t.lineNumber - 1
+        if let location = activeLocation,
+           location.fileID == fileID,
+           location.token != coord.lastToken {
+            coord.lastToken = location.token
+            let idx = location.lineNumber - 1
             guard idx >= 0 && idx < coord.lineRanges.count else { return }
             DispatchQueue.main.async { coord.jumpAndHighlight(lineIndex: idx) }
         }
     }
 
     class SmallCoord: NSObject {
+        private let logger = Logger(subsystem: "com.logviewer.app", category: "SmallFileJump")
         let textView = NSTextView()
         var lineRanges: [NSRange] = []
         var loadedCount = 0
@@ -155,6 +159,7 @@ let txtAttrs: [NSAttributedString.Key: Any] = [
         func jumpAndHighlight(lineIndex: Int) {
             guard lineIndex < lineRanges.count,
                   let storage = textView.textStorage else { return }
+            logger.info("Jump requested lineIndex=\(lineIndex) totalRanges=\(self.lineRanges.count)")
             storage.removeAttribute(.backgroundColor,
                 range: NSRange(location: 0, length: storage.length))
             let range = lineRanges[lineIndex]
@@ -162,19 +167,7 @@ let txtAttrs: [NSAttributedString.Key: Any] = [
             storage.addAttribute(.backgroundColor,
                 value: NSColor.controlAccentColor.withAlphaComponent(0.30), range: hlRange)
             textView.scrollRangeToVisible(range)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                guard let self = self,
-                      let lm = self.textView.layoutManager,
-                      let tc = self.textView.textContainer else { return }
-                var gr = NSRange()
-                lm.characterRange(forGlyphRange:
-                    lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil),
-                    actualGlyphRange: &gr)
-                let rect = lm.boundingRect(forGlyphRange: gr, in: tc)
-                let svH  = self.textView.enclosingScrollView?.contentView.bounds.height ?? 400
-                let y    = max(0, rect.midY - svH / 2)
-                self.textView.enclosingScrollView?.contentView.setBoundsOrigin(NSPoint(x: 0, y: y))
-            }
+            logger.info("Jump highlight applied lineIndex=\(lineIndex) rangeLocation=\(range.location) rangeLength=\(range.length)")
         }
     }
 }
@@ -183,7 +176,9 @@ let txtAttrs: [NSAttributedString.Key: Any] = [
 
 struct LargeFileTableView: NSViewRepresentable {
     let file: LogFile
-    let scrollTarget: ScrollTarget?
+    let activeLocation: ActiveLocation?
+
+    private static let rowHeight: CGFloat = 18
 
     func makeCoordinator() -> LargeCoord { LargeCoord(file: file) }
 
@@ -193,11 +188,12 @@ struct LargeFileTableView: NSViewRepresentable {
         tv.style = .plain
         tv.backgroundColor   = NSColor.textBackgroundColor
         tv.intercellSpacing  = .zero
-        tv.rowHeight         = 18
+        tv.rowHeight         = Self.rowHeight
         tv.headerView        = nil
         tv.usesAlternatingRowBackgroundColors = false
         tv.selectionHighlightStyle = .regular      // 允许行选中（多行复制）
-        tv.allowsMultipleSelection = true
+        tv.allowsMultipleSelection = false
+        tv.allowsEmptySelection = true
         tv.allowsColumnReordering  = false
         tv.columnAutoresizingStyle = .noColumnAutoresizing
 
@@ -230,37 +226,42 @@ struct LargeFileTableView: NSViewRepresentable {
     func updateNSView(_ sv: NSScrollView, context: Context) {
         let coord = context.coordinator
         let total = file.totalLineCount
+        coord.file = file
         if coord.totalRows != total {
             coord.totalRows = total
+            coord.updateDocumentSize(in: sv)
+            coord.tableView.noteNumberOfRowsChanged()
             coord.tableView.reloadData()
+        } else {
+            coord.updateDocumentSize(in: sv)
         }
-        if let t = scrollTarget, t.token != coord.lastToken {
-            coord.lastToken = t.token
-            let row = t.lineNumber - 1
+        if let location = activeLocation,
+           location.fileID == file.id,
+           location.token != coord.lastToken {
+            let row = location.lineNumber - 1
             guard row >= 0 && row < total else { return }
+            coord.pendingJumpRow = row
+            coord.pendingJumpToken = location.token
             DispatchQueue.main.async {
-                coord.highlightRow = row
-                coord.tableView.reloadData()
-                coord.tableView.scrollRowToVisible(row)
-                // 居中
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    guard let sv = coord.tableView.enclosingScrollView else { return }
-                    let rowRect = coord.tableView.rect(ofRow: row)
-                    let svH = sv.contentView.bounds.height
-                    let y = max(0, rowRect.midY - svH / 2)
-                    sv.contentView.setBoundsOrigin(NSPoint(x: 0, y: y))
-                }
+                coord.performPendingJumpIfPossible(in: sv)
+            }
+        } else {
+            DispatchQueue.main.async {
+                coord.performPendingJumpIfPossible(in: sv)
             }
         }
     }
 
     // MARK: Large Coordinator
     class LargeCoord: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        private let logger = Logger(subsystem: "com.logviewer.app", category: "LargeFileJump")
         let tableView  = NSTableView()
-        weak var file  : LogFile?
+        var file  : LogFile?
         var totalRows  : Int     = 0
         var highlightRow: Int?   = nil
         var lastToken  : UUID?   = nil
+        var pendingJumpRow: Int? = nil
+        var pendingJumpToken: UUID? = nil
 
         static let bodyFont   = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         static let gutterFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
@@ -305,6 +306,54 @@ struct LargeFileTableView: NSViewRepresentable {
         }
 
         func tableView(_ tv: NSTableView, heightOfRow row: Int) -> CGFloat { 18 }
+
+        func updateDocumentSize(in scrollView: NSScrollView) {
+            let height = max(CGFloat(totalRows) * LargeFileTableView.rowHeight, scrollView.contentView.bounds.height)
+            let width = max(scrollView.contentView.bounds.width, 4000)
+            tableView.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        }
+
+        func performPendingJumpIfPossible(in scrollView: NSScrollView) {
+            guard let row = pendingJumpRow,
+                  let token = pendingJumpToken,
+                  row >= 0,
+                  row < totalRows else { return }
+            let viewportHeight = scrollView.contentView.bounds.height
+            guard viewportHeight > 1, tableView.bounds.height > 0 else {
+                logger.info("Pending jump waiting row=\(row) totalRows=\(self.totalRows) viewportHeight=\(viewportHeight) tableHeight=\(self.tableView.bounds.height)")
+                return
+            }
+            logger.info("Perform pending jump row=\(row) totalRows=\(self.totalRows) viewportHeight=\(viewportHeight) tableHeight=\(self.tableView.bounds.height)")
+            jumpToRow(row, in: scrollView)
+            lastToken = token
+            pendingJumpRow = nil
+            pendingJumpToken = nil
+        }
+
+        func jumpToRow(_ row: Int, in scrollView: NSScrollView) {
+            let previousRow = highlightRow
+            highlightRow = row
+            refreshRows(previousRow: previousRow, currentRow: row)
+            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            tableView.layoutSubtreeIfNeeded()
+
+            let viewportHeight = scrollView.contentView.bounds.height
+            let maxOffset = max(0, tableView.bounds.height - viewportHeight)
+            let rowMidY = (CGFloat(row) + 0.5) * LargeFileTableView.rowHeight
+            let centeredY = min(max(0, rowMidY - viewportHeight / 2), maxOffset)
+            scrollView.contentView.setBoundsOrigin(NSPoint(x: 0, y: centeredY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            logger.info("Jump executed row=\(row) rowMidY=\(rowMidY) centeredY=\(centeredY) maxOffset=\(maxOffset)")
+        }
+
+        private func refreshRows(previousRow: Int?, currentRow: Int) {
+            var rows = IndexSet(integer: currentRow)
+            if let previousRow, previousRow != currentRow {
+                rows.insert(previousRow)
+            }
+            let columns = IndexSet(integersIn: 0..<tableView.numberOfColumns)
+            tableView.reloadData(forRowIndexes: rows, columnIndexes: columns)
+        }
 
         // 滚动时预取前后各 200 行
         @objc func onScroll(_ n: Notification) {

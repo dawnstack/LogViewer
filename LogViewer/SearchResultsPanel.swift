@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import os
 
 // MARK: - 结果面板：纯 NSTableView，彻底绕开 SwiftUI 滚动布局问题
 
@@ -85,6 +86,7 @@ struct ResultsTableView: NSViewRepresentable {
     // MARK: - Coordinator + 数据模型
 
     class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        private let logger = Logger(subsystem: "com.logviewer.app", category: "SearchNavigation")
         let tableView = NSTableView()
         var appState: AppState?
         var searchVM: SearchViewModel?
@@ -198,12 +200,12 @@ struct ResultsTableView: NSViewRepresentable {
         private func jumpTo(result: SearchResult) {
             guard let appState = appState, let searchVM = searchVM else { return }
             let url = result.fileURL
+            logger.info("Search result jump requested file=\(url.path, privacy: .public) line=\(result.lineNumber)")
             if let file = appState.openedFiles.first(where: { $0.url == url }) {
                 appState.selectedFileID = file.id
-                searchVM.highlightResult = result
                 Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 80_000_000)
-                    searchVM.scrollToLine = ScrollTarget(fileID: file.id, lineNumber: result.lineNumber)
+                    self.logger.info("Search result jump using already-open file line=\(result.lineNumber)")
+                    searchVM.activate(result: result, in: file, source: .searchResult)
                 }
             } else {
                 appState.openFile(url: url)
@@ -213,12 +215,12 @@ struct ResultsTableView: NSViewRepresentable {
                         if let file = appState.openedFiles.first(where: { $0.url == url }),
                            !file.isLoading {
                             appState.selectedFileID = file.id
-                            searchVM.highlightResult = result
-                            try? await Task.sleep(nanoseconds: 80_000_000)
-                            searchVM.scrollToLine = ScrollTarget(fileID: file.id, lineNumber: result.lineNumber)
+                            self.logger.info("Search result jump activating after file load line=\(result.lineNumber) totalLines=\(file.totalLineCount)")
+                            searchVM.activate(result: result, in: file, source: .searchResult)
                             return
                         }
                     }
+                    self.logger.error("Search result jump timed out waiting for file load line=\(result.lineNumber)")
                 }
             }
         }
