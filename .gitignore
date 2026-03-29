@@ -1,3 +1,24 @@
 .DS_Store
 # 如果你想更彻底一点，也可以忽略所有目录下可能产生的此类文件
 **/.DS_Store
+# Xcode 派生数据
+DerivedData/
+
+# 编译产物
+build/
+*.app
+*.framework
+*.ipa
+
+# 个人设置（例如窗口位置、展开的文件夹）
+xcuserdata/
+
+# 依赖管理
+# 如果使用 CocoaPods，建议保留 Podfile.lock，忽略 Pods/
+# Pods/
+
+# 如果使用 Swift Package Manager
+.build/
+.swiftpm/
+.deriveddata/
+

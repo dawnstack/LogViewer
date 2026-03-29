@@ -61,6 +61,7 @@ class LogFile: ObservableObject, Identifiable, Equatable {
     private var fileHandle  : FileHandle? = nil
     private let cache       = LineCache(capacity: 2000)
     private let ioQueue     = DispatchQueue(label: "logfile.io", qos: .userInitiated)
+    private let ioQueueKey  = DispatchSpecificKey<Void>()
 
     private var loadTask: Task<Void, Never>?
 
@@ -69,6 +70,7 @@ class LogFile: ObservableObject, Identifiable, Equatable {
 
     init(url: URL) {
         self.url = url
+        ioQueue.setSpecific(key: ioQueueKey, value: ())
         startLoading()
     }
 
@@ -89,18 +91,12 @@ class LogFile: ObservableObject, Identifiable, Equatable {
             }
             return lines[lineNumber - 1]
         }
-        // 大文件：先查缓存
-        let idx = lineNumber - 1
-        guard idx >= 0 && idx < lineIndexes.count else {
-            return LogLine(id: lineNumber, lineNumber: lineNumber, text: "")
+        if DispatchQueue.getSpecific(key: ioQueueKey) != nil {
+            return lineAtLargeFile(lineNumber)
         }
-        if let cached = cache.get(lineNumber) {
-            return LogLine(id: lineNumber, lineNumber: lineNumber, text: cached)
+        return ioQueue.sync {
+            lineAtLargeFile(lineNumber)
         }
-        // 同步从磁盘读（在 IO 队列调用时不阻塞主线程）
-        let text = readLineFromDisk(index: lineIndexes[idx])
-        cache.set(lineNumber, text: text)
-        return LogLine(id: lineNumber, lineNumber: lineNumber, text: text)
     }
 
     /// 预热缓存：提前加载 [from, to] 范围的行（供虚拟滚动提前请求）
@@ -126,7 +122,8 @@ class LogFile: ObservableObject, Identifiable, Equatable {
     // 小文件：直接搜 lines
     // 大文件：分块流式搜索，边读边返回，不全加载
     func searchStream(keyword: String, ignoreCase: Bool,
-                      onBatch: @escaping ([SearchResult]) -> Void) {
+                      onBatch: @escaping ([SearchResult]) -> Void,
+                      onComplete: @escaping () -> Void = {}) {
         let opts: String.CompareOptions = ignoreCase ? [.caseInsensitive] : []
         let fileURL = self.url
 
@@ -140,6 +137,7 @@ class LogFile: ObservableObject, Identifiable, Equatable {
                 }
             }
             if !batch.isEmpty { onBatch(batch) }
+            onComplete()
             return
         }
 
@@ -147,14 +145,21 @@ class LogFile: ObservableObject, Identifiable, Equatable {
         if let sniff = try? FileHandle(forReadingFrom: url) {
             let sample = sniff.readData(ofLength: 8192)
             try? sniff.close()
-            if sample.contains(0x00) { return }  // 二进制文件，跳过
+            if sample.contains(0x00) {
+                onComplete()
+                return
+            }
         }
 
         // 大文件：分块读取搜索，每 1000 条回调一次
         ioQueue.async { [weak self] in
             guard let self = self,
-                  let fh = try? FileHandle(forReadingFrom: self.url) else { return }
+                  let fh = try? FileHandle(forReadingFrom: self.url) else {
+                onComplete()
+                return
+            }
             defer { try? fh.close() }
+            defer { onComplete() }
 
             var batch: [SearchResult] = []
             let batchSize = 1000
@@ -292,6 +297,19 @@ class LogFile: ObservableObject, Identifiable, Equatable {
     }
 
     // MARK: - 磁盘读取（内部）
+
+    private func lineAtLargeFile(_ lineNumber: Int) -> LogLine {
+        let idx = lineNumber - 1
+        guard idx >= 0 && idx < lineIndexes.count else {
+            return LogLine(id: lineNumber, lineNumber: lineNumber, text: "")
+        }
+        if let cached = cache.get(lineNumber) {
+            return LogLine(id: lineNumber, lineNumber: lineNumber, text: cached)
+        }
+        let text = readLineFromDisk(index: lineIndexes[idx])
+        cache.set(lineNumber, text: text)
+        return LogLine(id: lineNumber, lineNumber: lineNumber, text: text)
+    }
 
     private func readLineFromDisk(index: LineIndex) -> String {
         guard let fh = fileHandle else { return "" }

@@ -160,8 +160,9 @@ class SearchEngine {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             file.searchStream(keyword: options.keyword, ignoreCase: options.ignoreCase) { batch in
                 allResults.append(contentsOf: batch)
+            } onComplete: {
+                cont.resume()
             }
-            cont.resume()
         }
 
         guard !allResults.isEmpty else { return }

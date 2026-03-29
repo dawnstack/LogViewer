@@ -42,9 +42,7 @@ class AppState: ObservableObject {
     }
 
     func openFolder(url: URL) {
-        // 获取 security-scoped 访问权限
-        let accessed = url.startAccessingSecurityScopedResource()
-        if accessed { accessedFolderURLs.append(url) }
+        retainFolderAccess(url)
 
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
@@ -90,6 +88,12 @@ class AppState: ObservableObject {
         for s in searchSessions { s.isExpanded = false }
         searchSessions.append(session)
         isSearchPanelVisible = true
+    }
+
+    func retainFolderAccess(_ url: URL) {
+        guard !accessedFolderURLs.contains(url) else { return }
+        let accessed = url.startAccessingSecurityScopedResource()
+        if accessed { accessedFolderURLs.append(url) }
     }
 
     deinit {

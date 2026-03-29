@@ -191,6 +191,10 @@ struct SearchToolbarView: View {
 
         // 优先从当前文件的已有搜索结果中找（不读磁盘）
         let allResults = appState.searchSessions
+            .filter {
+                $0.keyword == searchVM.keyword &&
+                $0.options.ignoreCase == searchVM.ignoreCase
+            }
             .flatMap { $0.fileResults }
             .filter { $0.fileURL == file.url }
             .flatMap { $0.results }
@@ -252,6 +256,7 @@ struct ScopePicker: View {
                 panel.allowsMultipleSelection = false
                 panel.title = "选择搜索文件夹"
                 if panel.runModal() == .OK, let url = panel.url {
+                    appState.retainFolderAccess(url)
                     searchVM.selectedFolderURL = url
                     searchVM.scope = .folder(url)
                 }
